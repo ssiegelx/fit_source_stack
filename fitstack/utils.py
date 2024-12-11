@@ -1,5 +1,6 @@
 """Utililites to prepare the data for the fit."""
 
+import logging
 import os
 import glob
 from pathlib import Path
@@ -12,6 +13,8 @@ from caput import misc
 from draco.util import tools
 
 from . import containers
+
+logger = logging.getLogger(__name__)
 
 
 def covariance(a, corr=False):
@@ -245,7 +248,6 @@ def initialize_pol(cnt, pol=None, combine=False):
     cpol = list(cnt.pol)
     ipol = np.array([cpol.index(pstr) for pstr in pol])
 
-    num_freq = cnt.freq.size
     num_cpol = ipol.size
 
     num_pol = num_cpol + int(combine)
