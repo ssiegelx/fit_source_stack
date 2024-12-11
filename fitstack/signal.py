@@ -183,7 +183,7 @@ class SignalTemplate:
 
             return (
                 self._factor * stack.stack[:],
-                self._factor ** 2
+                self._factor**2
                 * tools.invert_no_zero(stack.attrs["num"] * stack.weight[:]),
             )
 
@@ -231,7 +231,7 @@ class SignalTemplate:
 
             # Calculate the finite difference derivative
             fd_mode = (s - sb) / delta
-            fd_var = (v + vb) / delta ** 2
+            fd_var = (v + vb) / delta**2
 
             self._stack_comp[name] = (fd_mode, fd_var)
 
@@ -407,7 +407,7 @@ class SignalTemplateFoG(SignalTemplate):
         nfreq = self.freq.size
         df = np.abs(self.freq[1] - self.freq[0])
         tau = np.fft.rfftfreq(nfreq, d=df)[np.newaxis, :]
-        tau2 = tau ** 2
+        tau2 = tau**2
 
         mu_fft_base = np.abs(np.fft.rfft(base.stack[:], nfreq, axis=-1))
         mu_fft_deriv = np.abs(np.fft.rfft(deriv.stack[:], nfreq, axis=-1))
@@ -424,14 +424,14 @@ class SignalTemplateFoG(SignalTemplate):
         )
 
         ratio = mu_fft_base * tools.invert_no_zero(mu_fft_deriv)
-        var_ratio = ratio ** 2 * (
-            var_fft_base * tools.invert_no_zero(mu_fft_base ** 2)
-            + var_fft_deriv * tools.invert_no_zero(mu_fft_deriv ** 2)
+        var_ratio = ratio**2 * (
+            var_fft_base * tools.invert_no_zero(mu_fft_base**2)
+            + var_fft_deriv * tools.invert_no_zero(mu_fft_deriv**2)
         )
 
-        y = (ratio - 1.0) * tools.invert_no_zero(alpha ** 2 - ratio)
+        y = (ratio - 1.0) * tools.invert_no_zero(alpha**2 - ratio)
 
-        w = (alpha ** 2 - ratio) ** 4 * tools.invert_no_zero(
+        w = (alpha**2 - ratio) ** 4 * tools.invert_no_zero(
             (alpha * 2 - 1.0) ** 2 * var_ratio
         )
 
@@ -440,7 +440,7 @@ class SignalTemplateFoG(SignalTemplate):
         )
 
         scale2 = np.sum(w * tau2 * y, axis=-1) * tools.invert_no_zero(
-            np.sum(w * tau2 ** 2, axis=-1)
+            np.sum(w * tau2**2, axis=-1)
         )
 
         return np.sqrt(scale2)

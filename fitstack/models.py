@@ -1,4 +1,5 @@
 """Define models that can be fit to the source stack."""
+
 import inspect
 import logging
 

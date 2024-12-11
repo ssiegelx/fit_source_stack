@@ -155,7 +155,7 @@ def fit_histogram(
 
     # Define the fitting function
     def gauss(x, peak, mu, sigma):
-        return peak * np.exp(-((x - mu) ** 2) / (2.0 * sigma ** 2))
+        return peak * np.exp(-((x - mu) ** 2) / (2.0 * sigma**2))
 
     # Perform the fit
     par, var_par = curve_fit(
@@ -312,7 +312,7 @@ def process_data_matched_filter(
             (noise_scale_factor[:, np.newaxis] * exp_std_mock) ** 2
         )
     else:
-        weight = tools.invert_no_zero(obs_std_mock ** 2)
+        weight = tools.invert_no_zero(obs_std_mock**2)
 
     # Calculate the standard deviation of the mocks by fitting to histogram
     dcmock = {}

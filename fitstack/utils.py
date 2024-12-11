@@ -1,4 +1,5 @@
 """Utililites to prepare the data for the fit."""
+
 import os
 import glob
 from pathlib import Path
