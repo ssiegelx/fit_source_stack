@@ -1,4 +1,5 @@
 """Perform an MCMC fit of a model to a source stack."""
+
 import logging
 import inspect
 
@@ -209,7 +210,7 @@ def run_mcmc(
         data, pol=required_pol, combine=combine_pol
     )
     data_stack = scale * data_stack[..., isort]
-    weight_stack = weight_stack[..., isort] / scale ** 2
+    weight_stack = weight_stack[..., isort] / scale**2
     npol = len(pol)
 
     mock_stack, _, _ = utils.initialize_pol(

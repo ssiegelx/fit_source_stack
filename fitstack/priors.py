@@ -96,7 +96,7 @@ class Gaussian(Prior):
 
         self.loc = loc
         self.scale = scale
-        self.norm = 1.0 / np.sqrt(2.0 * np.pi * self.scale ** 2)
+        self.norm = 1.0 / np.sqrt(2.0 * np.pi * self.scale**2)
 
     def evaluate(self, theta):
         """Evaluate the probability of observing this value of the parameter.
@@ -112,7 +112,7 @@ class Gaussian(Prior):
             The probability of observing the input parameter value.
         """
 
-        return self.norm * np.exp(-((theta - self.loc) ** 2) / (2.0 * self.scale ** 2))
+        return self.norm * np.exp(-((theta - self.loc) ** 2) / (2.0 * self.scale**2))
 
     def draw_random(self):
         """Draw a random value of the parameter from the prior distribution.
