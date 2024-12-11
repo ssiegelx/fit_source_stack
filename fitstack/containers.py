@@ -2,10 +2,10 @@
 
 import numpy as np
 
-from draco.core.containers import *
+import draco.core.containers as c
 
 
-class StackSet1D(FrequencyStackByPol):
+class StackSet1D(c.FrequencyStackByPol):
     """Container for all data required to perform a model fit to a 1D stack."""
 
     _axes = ("mock",)
@@ -32,7 +32,7 @@ class StackSet1D(FrequencyStackByPol):
     }
 
 
-class StackSet3D(Stack3D):
+class StackSet3D(c.Stack3D):
     """Container for all data required to perform a model fit to a 3D stack."""
 
     _axes = ("mock",)
@@ -59,7 +59,7 @@ class StackSet3D(Stack3D):
     }
 
 
-class MCMCFit(ContainerBase):
+class MCMCFit(c.ContainerBase):
     """Base container for the results of a model fit."""
 
     _axes = ("step", "walker", "param", "percentile")

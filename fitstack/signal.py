@@ -1,7 +1,6 @@
 import logging
 import re
 import glob
-import os
 from typing import Dict, Optional, Tuple, List
 from pathlib import Path
 
@@ -9,7 +8,7 @@ import numpy as np
 from scipy.fftpack import next_fast_len
 
 from draco.util import tools
-from draco.core.containers import FrequencyStackByPol, MockFrequencyStackByPol
+from draco.core.containers import FrequencyStackByPol
 
 from . import utils
 
