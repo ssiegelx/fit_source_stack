@@ -106,7 +106,7 @@ class Model(object):
         ]
 
     def set_data(self, **kwargs):
-        """Save any ancillary data needed to evaluate the probabily distribution.
+        """Save any ancillary data needed to evaluate the probability distribution.
 
         Parameters
         ----------
@@ -856,3 +856,49 @@ class SimulationTemplateFoGTransform(SimulationTemplateFoG):
         residual = np.ravel(data - mdl)
 
         return -0.5 * np.matmul(residual.T, np.matmul(inv_cov, residual))
+
+
+class AutoConstant(Model):
+    """Power spectrum model that's a constant in k with a free amplitude."""
+
+    param_name = ["amp"]
+
+    _param_spec = {
+        "amp": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": 0.0,
+                "high": 10.0,
+            },
+        },
+    }
+
+    def model(self, theta, k1D=None, transfer=None, template=None, pol_sel=None):
+        """Evaluate constant-power-spectrum model.
+
+        Parameters
+        ----------
+        theta : [amp]
+            One-element list containing the model amplitude.
+        k1D : np.ndarray[npol,nk]
+            K values for each pol.  If not provided, method will use
+            the `k1D` attribute.
+        transfer, template, pol_sel
+            Unused arguments.
+
+        Returns
+        -------
+        model : np.ndarray[..., nk]
+            Model for the signal.
+        """
+
+        if k1D is None:
+            k1D = self.k1D
+
+        amp = theta[0]
+
+        model = np.full(k1D.shape, amp)
+
+        return model
