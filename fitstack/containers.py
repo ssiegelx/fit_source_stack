@@ -1,11 +1,19 @@
 """Containers for storing data products and fit results."""
 
+from typing import ClassVar
+
 import numpy as np
 
-import draco.core.containers as c
+from draco.core.containers import (
+    ContainerBase,
+    FrequencyStackByPol,
+    MockFrequencyStackByPol,
+    Stack3D,
+    Powerspec1D,
+)
 
 
-class StackSet1D(c.FrequencyStackByPol):
+class StackSet1D(FrequencyStackByPol):
     """Container for all data required to perform a model fit to a 1D stack."""
 
     _axes = ("mock",)
@@ -32,7 +40,7 @@ class StackSet1D(c.FrequencyStackByPol):
     }
 
 
-class StackSet3D(c.Stack3D):
+class StackSet3D(Stack3D):
     """Container for all data required to perform a model fit to a 3D stack."""
 
     _axes = ("mock",)
@@ -59,7 +67,66 @@ class StackSet3D(c.Stack3D):
     }
 
 
-class MCMCFit(c.ContainerBase):
+class PowerspecSet1D(Powerspec1D):
+    """Container for data required to perform a model fit with a 1d power spectrum."""
+
+    _axes = ("mock",)
+
+    _dataset_spec = {
+        "mock": {
+            "axes": ["mock", "pol", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "template": {
+            "axes": ["pol", "k"],
+            "dtype": np.float64,
+            "initialise": False,
+            "distributed": False,
+        },
+    }
+
+
+class MockPowerspec1D(Powerspec1D):
+    """Container for multiple 1d power spectrum.
+
+    This will most commonly be used to store several noise power spectra,
+    for use in computing a covariance matrix. The spectra will be indexed
+    by the `mock` axis, to carry over conventions from the stacking analysis.
+    """
+
+    _axes = ("mock",)
+
+    _dataset_spec: ClassVar = {
+        "ps1D": {
+            "axes": ["mock", "pol", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "ps1D_error": {
+            "axes": ["mock", "pol", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "ps1D_var": {
+            "axes": ["mock", "pol", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "k1D": {
+            "axes": ["mock", "pol", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+    }
+
+
+class MCMCFit(ContainerBase):
     """Base container for the results of a model fit."""
 
     _axes = ("step", "walker", "param", "percentile")
@@ -265,3 +332,59 @@ class MCMCFit3D(MCMCFit, StackSet3D):
             "distributed": False,
         },
     }
+
+
+class MCMCFitPowerspec1D(MCMCFit, PowerspecSet1D):
+    """Container for the results of a model fit to 1D power spectrum and all associated data."""
+
+    _axes = ("x",)
+
+    _dataset_spec = {
+        "cov": {
+            "axes": ["pol", "pol", "k", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "error": {
+            "axes": ["pol", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "k_flag": {
+            "axes": ["k"],
+            "dtype": np.bool,
+            "initialise": True,
+            "distributed": False,
+        },
+        "flag": {
+            "axes": ["x"],
+            "dtype": np.bool,
+            "initialise": True,
+            "distributed": False,
+        },
+        "precision": {
+            "axes": ["x", "x"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "model_min_chisq": {
+            "axes": ["pol", "k"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "model_percentile": {
+            "axes": ["pol", "k", "percentile"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+    }
+
+    @property
+    def ndof(self):
+        """Return the number of degrees of freedom."""
+        return np.sum(self.datasets["flag"][:]) - self.index_map["param"].size

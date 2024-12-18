@@ -48,6 +48,8 @@ def run_mcmc(
     nwalker=32,
     nsample=15000,
     max_freq=None,
+    min_k=None,
+    max_k=None,
     flag_before=True,
     normalize_template=False,
     mean_subtract=True,
@@ -61,26 +63,28 @@ def run_mcmc(
 
     Parameters
     ----------
-    data : FrequencyStackByPol or str
-        Stack of the data on the sources.  This can either be a
-        FrequencyStackByPol container or the name of a file that
-        holds such a container and will be loaded from disk.
-    mocks : MockFrequencyStackByPol, list of FrequencyStackByPol, str, list of str
-        Stack of the data on a set of random mock catalogs.
-        This can either be a MockFrequencyStackByPol container
-        or a list of FrequencyStackByPol containers.  It can also
-        be the name of a file or a list of filenames that hold
+    data : FrequencyStackByPol, Powerspec1D, or str
+        Measurements of stacking or power spectrum.
+        This can either be a FrequencyStackByPol or Powerspec1D container,
+        or the name of a file that holds such a container and will be
+        loaded from disk.
+    mocks : container, list of containers, str, or list of str
+        Mocks for estimating a noise covariance.
+        This can either be a MockFrequencyStackByPol or MockPowerspec1D
+        container, a list of FrequencyStackByPol or Powerspec1D containers,
+        or the name of a file or a list of filenames that hold
         such containers and will be loaded from disk.
     transfer : FrequencyStackByPol or str
-        The transfer function of the pipeline.  The model for the stacked
+        The transfer function of the pipeline (only implemented for stacking).
+        The model for the stacked
         signal will be convolved with the transfer function prior
         to comparing to the data.  This can either be a
         FrequencyStackByPol container or the name of a file that
         holds such a container and will be loaded from disk.
         If None, then a transfer function is not applied.  Default is None.
-    template : FrequencyStackByPol or str
+    template : FrequencyStackByPol, Powerspec1D, or str
         Template for the stacked signal.  This can either be a
-        FrequencyStackByPol container or the name of a file that
+        FrequencyStackByPol or Powerspec1D container, or the name of a file that
         holds such a container and will be loaded from disk.
         Note that not all models require templates.  Default is None.
     pol_fit : {"XX"|"YY"|"I"|"joint"}
@@ -89,36 +93,41 @@ def run_mcmc(
         fit to the "XX" and "YY" polarisations.
     model_name : {"DeltaFunction"|"Exponential"|"ScaledShiftedTemplate"|
                   "SimulationTemplate"|"SimulationTemplateFoG"|
-                  "SimulationTemplateFoGAltParam"}
+                  "SimulationTemplateFoGAltParam"|"AutoConstant"}
         Name of the model to fit.  Specify the class name from the
         fitstack.models module.
     scale : float
         All data will be scaled by this quantity.  Default is 1e6, under the
-        assumption that the stacked signal is in units of Jy / beam and we would
-        like to convert to micro-Jy / beam.  Set to 1.0 if you do not want to
-        scale the data.
+        assumption that the signal in a stacking analysis is in units of Jy / beam
+        and we would like to convert to micro-Jy / beam.
+        Set to 1.0 if you do not want to scale the data.
     nwalker : int
         Number of walkers to use in the MCMC fit.  Default is 32.
     nsample : int
         Number of steps that each walker will take.  Default is 15000.
     max_freq : float
-        The maximum frequency offset to include in the fit.  If this None,
+        The maximum frequency offset to include in a stacking fit.  If this None,
         then all frequency offsets that are present in the data stack
         will be included.  Default is None.
+    min_k, max_k : float
+        The minimum or maximum k values to include in a power spectrum fit.
+        Default is None.
     flag_before : bool
-        Only relevant if max_freq is not None.  The frequency offset flag will
-        be applied prior to calculating the inverse of the covariance matrix.
-        Default is True.
+        Only relevant if max_freq, min_k, or max_k is not None.
+        The frequency offset flag will be applied prior to calculating the
+        inverse of the covariance matrix. Default is True.
     normalize_template : bool
-        Divide the template by it's maximum value prior to fitting.
+        Divide the template by its maximum value prior to fitting.
         Default is False.
     mean_subtract : bool
         Subtract the sample mean of the mocks from the data prior to fitting.
         Default is True.
     recompute_weight : bool
-        Set the weight dataset to the inverse variance over the mock catalogs.
+        Set the weight dataset to the inverse variance over the mock catalogs
+        in a stacking analysis, or set the ps1D_var dataset to the variance over
+        the noise power spectra in a power spectrum analysis.
         This is only used when averaging the "XX" and "YY" polarisations to
-        determine the "I" polarisation.  Otherwise whatever weight dataset
+        determine the "I" polarisation.  Otherwise whatever weight/ps1D_var dataset
         is saved to the file will be used.  Default is True.
     param_spec : dict
         Dictionary that specifies the prior distribution for each parameter.
@@ -157,92 +166,132 @@ def run_mcmc(
     if isinstance(data, str):
         data = utils.load_pol(utils.find_file(data), pol=required_pol)
 
-    # Load the transfer function
+    # From the input container, determine the dataset corresponding to the observable
+    # (stack or power spectrum)
+    if isinstance(data, containers.FrequencyStackByPol):
+        dset = "stack"
+    elif isinstance(data, containers.Powerspec1D):
+        dset = "ps1D"
+    else:
+        raise RuntimeError(f"Input container {type(data)} not supported")
+
+    # Load the transfer function (not implemented for power spectra)
     if transfer is not None and isinstance(transfer, str):
+        if dset == "ps1D":
+            raise NotImplementedError(
+                "Transfer function convolution not implemented for power spectrum"
+            )
         transfer = utils.load_pol(utils.find_file(transfer), pol=required_pol)
 
     # Load the templates
     if template is not None:
         template = utils.load_mocks(template, pol=required_pol)
 
-    # Load the mock catalogs
+    # Load the mock catalogs or noise power spectra
     mocks = utils.load_mocks(mocks, pol=required_pol)
     nmock = mocks.index_map["mock"].size
 
-    # If requested, use the inverse variance over the mock catalogs as the weight
-    # when averaging over polarisations.
+    # If requested, use the inverse variance over the mock catalogs
+    # or noise power spectra as the weight when averaging over polarisations.
     if recompute_weight:
 
-        inv_var = tools.invert_no_zero(np.var(mocks.stack[:], axis=0))
-        axes = mocks.stack.attrs["axis"][1:]
+        axes = mocks[dset].attrs["axis"][1:]
 
         for container in [data, mocks, template, transfer]:
             if container is not None:
-                expand = tuple(
-                    slice(None) if ax in axes else None
-                    for ax in container.weight.attrs["axis"]
-                )
-                container.weight[:] = inv_var[expand]
+                if dset == "stack":
+                    inv_var = tools.invert_no_zero(np.var(mocks.stack[:], axis=0))
+                    expand = tuple(
+                        slice(None) if ax in axes else None
+                        for ax in container.weight.attrs["axis"]
+                    )
+                    container.weight[:] = inv_var[expand]
+                else:
+                    variance = np.var(mocks.ps1D[:], axis=0)
+                    expand = tuple(
+                        slice(None) if ax in axes else None
+                        for ax in container.ps1D_var.attrs["axis"]
+                    )
+                    container.ps1D_var[:] = variance[expand]
 
-    # For the simulation template we need to provide parameters to average the polarisations
+    # For the simulation template, we need to provide parameters to average the polarisations
     if model_name in SIMULATION_MODELS:
-        model_kwargs["weight"] = inv_var if recompute_weight else data.weight[:]
+        model_kwargs["weight"] = (
+            data.weight[:] if dset == "stack" else tools.invert_no_zero(data.ps1D_var)
+        )
         model_kwargs["pol"] = required_pol
         model_kwargs["combine"] = combine_pol
         model_kwargs["sort"] = True
 
-    # Determine the frequencies to fit
-    freq = data.freq[:]
-    nfreq = freq.size
-
-    isort = np.argsort(freq)
-    freq = freq[isort]
-
-    if max_freq is not None:
-        freq_flag = np.abs(freq) < max_freq
-    else:
-        freq_flag = np.ones(nfreq, dtype=bool)
-
-    freq_index = np.flatnonzero(freq_flag)
-
-    # Initialize all arrays
-    data_stack, weight_stack, pol = utils.initialize_pol(
+    # Initialize data arrays.
+    # We use x to stand for either frequencies or k values, depending on input data type
+    data_meas, weight_meas, pol, x_meas = utils.initialize_pol(
         data, pol=required_pol, combine=combine_pol
     )
-    data_stack = scale * data_stack[..., isort]
-    weight_stack = weight_stack[..., isort] / scale**2
+
+    # Sort frequencies or k values, then determine which values to use in fit
+    isort = np.argsort(x_meas, axis=-1)
+    x = np.take_along_axis(x_meas, isort, axis=-1)
+    nx = x.shape[-1]
+
+    if dset == "stack":
+        if max_freq is None:
+            max_freq = 1e10
+        x_flag = np.abs(x) < max_freq
+    else:
+        if min_k is None:
+            min_k = 0.0
+        if max_k is None:
+            max_k = 1e10
+        x_flag = (np.abs(x) > min_k) & (np.abs(x) < max_k)
+
+    # Use pol-independent flags, for simplicity
+    x_1d_flag = np.all(x_flag, axis=0)
+    x_1d_index = np.flatnonzero(x_1d_flag)
+    x_1d_slice = slice(x_1d_index[0], x_1d_index[-1] + 1)
+
+    # If working with stacks, define 1d frequency axis for later convenience
+    if dset == "stack":
+        freq = np.mean(x, axis=0)
+
+    # Sort data and weight arrays
+    data_meas = scale * np.take_along_axis(data_meas, isort, axis=-1)
+    weight_meas = np.take_along_axis(weight_meas, isort, axis=-1) / scale**2
     npol = len(pol)
 
-    mock_stack, _, _ = utils.initialize_pol(
+    # Initialize array for mocks
+    mock_meas, _, _, _ = utils.initialize_pol(
         mocks, pol=required_pol, combine=combine_pol
     )
-    mock_stack = scale * mock_stack[..., isort]
+    mock_meas = scale * np.take_along_axis(mock_meas, isort[np.newaxis, ...], axis=-1)
 
+    # Initialize array for transfer function
     if transfer is not None:
-        transfer_stack, _, _ = utils.initialize_pol(
+        transfer_meas, _, _, _ = utils.initialize_pol(
             transfer, pol=required_pol, combine=combine_pol
         )
-        transfer_stack = transfer_stack[..., isort]
+        transfer_meas = np.take_along_axis(transfer_meas, isort, axis=-1)
 
+    # Initialize array for template
     if template is not None:
         # Use the mean value of the template over realizations
-        template = utils.average_stacks(
+        template = utils.average_data(
             template, pol=required_pol, combine=combine_pol, sort=True
         )
-        template_stack = scale * template.stack[:]
+        template_meas = scale * template[dset][:]
 
         if normalize_template:
             max_template = np.max(
-                template_stack[..., freq_index], axis=-1, keepdims=True
+                template_meas[..., x_1d_slice], axis=-1, keepdims=True
             )
-            template_stack = template_stack / max_template
+            template_meas = template_meas / max_template
 
-    # Subtract mean value of mocks
+    # Subtract mean value of mocks from the mocks and data
     if mean_subtract:
         logger.info("Subtracting the mean value of the mocks.")
-        mu = np.mean(mock_stack, axis=0)
-        mock_stack = mock_stack - mu[np.newaxis, ...]
-        data_stack = data_stack - mu
+        mu = np.mean(mock_meas, axis=0)
+        mock_meas = mock_meas - mu[np.newaxis, ...]
+        data_meas = data_meas - mu
 
     # Prepare the model
     Model = getattr(models, model_name)
@@ -252,9 +301,8 @@ def run_mcmc(
     nparam = len(param_name)
 
     # Calculate the covariance over mocks
-    cov_flat = utils.covariance(mock_stack.reshape(nmock, -1), corr=False)
-
-    cov = utils.unravel_covariance(cov_flat, npol, nfreq)
+    cov_flat = utils.covariance(mock_meas.reshape(nmock, -1), corr=False)
+    cov = utils.unravel_covariance(cov_flat, npol, nx)
 
     # Determine the polarisation to fit
     if pol_fit in ["XX", "YY", "I"]:
@@ -262,19 +310,19 @@ def run_mcmc(
         npol_fit = 1
 
         C = cov[ipol, ipol]
-        ifit = freq_index
+        ifit = x_1d_index
 
     elif pol_fit == "joint":
         ipol = np.array([pol.index(pstr) for pstr in ["XX", "YY"]])
         npol_fit = len(ipol)
 
         C = utils.ravel_covariance(cov[ipol][:, ipol])
-        ifit = np.concatenate(tuple([p * nfreq + freq_index for p in range(npol_fit)]))
+        ifit = np.concatenate(tuple([p * nx + x_1d_index for p in range(npol_fit)]))
 
     else:
         raise ValueError(
-            f"Do not recognize polarisation {pol_fit}, "
-            "possible values are 'XX', 'YY', 'I' or 'joint'"
+            f"Do not recognize polarisation {pol_fit} "
+            "(possible values are 'XX', 'YY', 'I' or 'joint')"
         )
 
     # Apply extra flagging if specified
@@ -285,47 +333,66 @@ def run_mcmc(
     else:
         logger.debug("No samples flagged out.")
 
+    # Make array of coordinates for MCMC, as list of (pol, coord_value) tuples
     pol = np.array(pol)
-    x = np.zeros(nfreq * npol_fit, dtype=[("pol", "U8"), ("freq", np.float64)])
+    x_coord_name = "freq" if dset == "stack" else "k"
+    x_for_mcmc = np.zeros(
+        nx * npol_fit, dtype=[("pol", "U8"), (x_coord_name, np.float64)]
+    )
     for p, pstr in enumerate(np.atleast_1d(pol[ipol])):
-        slc = slice(p * nfreq, (p + 1) * nfreq)
-        x["pol"][slc] = pstr
-        x["freq"][slc] = freq
+        slc = slice(p * nx, (p + 1) * nx)
+        x_for_mcmc["pol"][slc] = pstr
+        x_for_mcmc[x_coord_name][slc] = x[p]
 
     # Create results container
-    results = containers.MCMCFit1D(
-        x=x,
-        freq=freq,
-        pol=pol,
-        mock=nmock,
-        walker=nwalker,
-        step=nsample,
-        param=np.array(model.param_name),
-        percentile=np.array(PERCENTILE),
-    )
+    if dset == "stack":
+        results = containers.MCMCFit1D(
+            x=x_for_mcmc,
+            freq=freq,
+            pol=pol,
+            mock=nmock,
+            walker=nwalker,
+            step=nsample,
+            param=np.array(model.param_name),
+            percentile=np.array(PERCENTILE),
+        )
+        results["weight"][:] = weight_meas
+        results["freq_flag"][:] = x_1d_flag
+
+    else:
+        results = containers.MCMCFitPowerspec1D(
+            x=x_for_mcmc,
+            k=nx,
+            pol=pol,
+            mock=nmock,
+            walker=nwalker,
+            step=nsample,
+            param=np.array(model.param_name),
+            percentile=np.array(PERCENTILE),
+        )
+        results["ps1D_var"][:] = tools.invert_no_zero(weight_meas)
+        results["k_flag"][:] = x_1d_flag
 
     results.attrs["seed"] = str(model.seed)
     results.attrs["model"] = model_name
     results.attrs["pol_fit"] = pol_fit
 
-    results["mock"][:] = mock_stack
-    results["stack"][:] = data_stack
-    results["weight"][:] = weight_stack
-    results["freq_flag"][:] = freq_flag
+    results["mock"][:] = mock_meas
+    results[dset][:] = data_meas
 
     results["fixed"][:] = True
     results["fixed"][:][model.fit_index] = False
 
     if transfer is not None:
         results.add_dataset("transfer_function")
-        results["transfer_function"][:] = transfer_stack
+        results["transfer_function"][:] = transfer_meas
 
     if template is not None:
         results.add_dataset("template")
-        results["template"][:] = template_stack
+        results["template"][:] = template_meas
 
     results["cov"][:] = cov
-    results["error"][:] = np.sqrt(np.diag(cov_flat).reshape(npol, nfreq))
+    results["error"][:] = np.sqrt(np.diag(cov_flat).reshape(npol, nx))
 
     # Invert the covariance matrix to obtain the precision matrix
     Cinv = np.zeros_like(C)
@@ -345,21 +412,27 @@ def run_mcmc(
     results["flag"][:] = np.diag(Cinv) > 0.0
 
     # Set the data for this polarisation
-    y = data_stack[ipol]
+    y = data_meas[ipol]
 
-    fit_kwargs = {"freq": freq, "data": y, "inv_cov": Cinv}
-    eval_kwargs = {"freq": freq}
+    if dset == "stack":
+        # freq is 1d array of frequencies
+        fit_kwargs = {"freq": freq, "data": y, "inv_cov": Cinv}
+        eval_kwargs = {"freq": freq}
+    else:
+        # Reminder: x is 2d array of [pol,k]
+        fit_kwargs = {"k1D": x[ipol], "data": y, "inv_cov": Cinv}
+        eval_kwargs = {"k1D": x}
 
     if transfer is not None:
-        fit_kwargs["transfer"] = transfer_stack[ipol]
-        eval_kwargs["transfer"] = transfer_stack[:]
+        fit_kwargs["transfer"] = transfer_meas[ipol]
+        eval_kwargs["transfer"] = transfer_meas[:]
     else:
         fit_kwargs["transfer"] = None
         eval_kwargs["transfer"] = None
 
     if template is not None:
-        fit_kwargs["template"] = template_stack[ipol]
-        eval_kwargs["template"] = template_stack[:]
+        fit_kwargs["template"] = template_meas[ipol]
+        eval_kwargs["template"] = template_meas[:]
 
     if model_name in SIMULATION_MODELS:
         fit_kwargs["pol_sel"] = ipol
@@ -418,7 +491,7 @@ def run_mcmc(
     results["span_upper"][:] = dq[:, 2]
 
     # Compute percentiles of the model
-    mdl = np.zeros((flat_samples.shape[0], npol, nfreq), dtype=np.float32)
+    mdl = np.zeros((flat_samples.shape[0], npol, nx), dtype=np.float32)
     for ss, theta in enumerate(flat_samples):
         mdl[ss] = model.model(theta, **eval_kwargs)
 
@@ -462,6 +535,8 @@ class RunMCMC(task.SingleTask):
     nsample = config.Property(proptype=int)
 
     max_freq = config.Property(proptype=float)
+    min_k = config.Property(proptype=float)
+    max_k = config.Property(proptype=float)
     flag_before = config.Property(proptype=bool)
     normalize_template = config.Property(proptype=bool)
     mean_subtract = config.Property(proptype=bool)
