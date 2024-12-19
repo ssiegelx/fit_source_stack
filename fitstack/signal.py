@@ -129,7 +129,7 @@ class SignalTemplate:
 
             mocks = utils.load_mocks(stack_files, pol=pol)
             mocks.weight[:] = weight[np.newaxis, :] if weight is not None else 1.0
-            stacks[key] = utils.average_stacks(
+            stacks[key] = utils.average_data(
                 mocks, pol=mocks.pol, combine=combine, sort=sort
             )
 
