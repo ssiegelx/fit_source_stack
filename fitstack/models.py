@@ -323,7 +323,7 @@ class Model(object):
 
 
 class ScaledShiftedTemplate(Model):
-    """Scaled and shifted template model."""
+    """Scaled and shifted stacking template model."""
 
     param_name = ["amp", "offset"]
 
@@ -349,7 +349,7 @@ class ScaledShiftedTemplate(Model):
     }
 
     def model(self, theta, freq=None, transfer=None, template=None):
-        """Evaluate the model consisting of a scaled and shifted template.
+        """Evaluate the model consisting of a scaled and shifted stacking template.
 
         .. math::
 
@@ -882,7 +882,7 @@ class AutoConstant(Model):
         ----------
         theta : [amp]
             One-element list containing the model amplitude.
-        k1D : np.ndarray[npol,nk]
+        k1D : np.ndarray[npol, nk]
             K values for each pol.  If not provided, method will use
             the `k1D` attribute.
         transfer, template, pol_sel
@@ -900,5 +900,194 @@ class AutoConstant(Model):
         amp = theta[0]
 
         model = np.full(k1D.shape, amp)
+
+        return model
+
+
+class AutoScaledTemplate(Model):
+    """Scaled power spectrum template model."""
+
+    param_name = ["amp"]
+
+    _param_spec = {
+        "amp": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": 0.0,
+                "high": 10.0,
+            },
+        },
+    }
+
+    def model(self, theta, k1D=None, template=None, transfer=None, pol_sel=None):
+        """Evaluate the model consisting of a scaled power spectrum template.
+
+        The power spectrum template is simply multiplied by a free amplitude.
+
+        Parameters
+        ----------
+        theta : [amp]
+            One-element list containing the template amplitude.
+        k1D : np.ndarray[npol,nk]
+            K values for each pol. (Not actually used in model evaluation.)
+        template : np.ndarray[..., nk]
+            Signal template.
+        transfer, pol_sel
+            Unused arguments.
+
+        Returns
+        -------
+        model : np.ndarray[..., nk]
+            Model for the signal.
+        """
+
+        if k1D is None:
+            k1D = self.k1D
+
+        if template is None:
+            template = self.template
+
+        amp = theta[0]
+
+        model = amp * template
+
+        return model
+
+
+class AutoSimulationTemplate2Dto1D(Model):
+    """Linear combination of 2D power spectrum templates from simulations."""
+
+    param_name = ["omega", "b_HI", "NL", "FoGh", "M_10"]
+
+    _param_spec = {
+        "offset": {
+            "fixed": False,
+            "value": 0.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": -0.8,
+                "high": 0.8,
+            },
+        },
+        "omega": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": 0.0,
+                "high": 5.0,
+            },
+        },
+        "b_HI": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": 0.0,
+                "high": 8.0,
+            },
+        },
+        "NL": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": -1.0,
+                "high": 7.0,
+            },
+        },
+        "FoGh": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": 0.0,
+                "high": 4.0,
+            },
+        },
+        "M_10": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": 0.0,
+                "high": 25.0,
+            },
+        },
+    }
+
+    _template_class = signal.AutoSignalTemplate2D
+    _template_kwargs = ()
+
+    def __init__(
+        self,
+        pattern,
+        pol=None,
+        weight=None,
+        signal_mask=None,
+        combine=True,
+        sort=False,
+        derivs=None,
+        factor=1,
+        aliases=None,
+        nbins=10,
+        logbins=True,
+        *args,
+        **kwargs,
+    ):
+
+        if derivs is None:
+            derivs = {"lin": (-1.0, 1.0)}
+
+        if aliases is None:
+            aliases = {"shotnoise": "M_10", "lin": "NL"}
+
+        self._signal_template = self._template_class.load_from_ps2Dfiles(
+            pattern,
+            pol=pol,
+            weight=weight,
+            signal_mask=signal_mask,
+            combine=combine,
+            derivs=derivs,
+            factor=factor,
+            aliases=aliases,
+            nbins=nbins,
+            logbins=logbins,
+            **{k: v for k, v in kwargs.items() if k in self._template_kwargs},
+        )
+
+        super().__init__(*args, **kwargs)
+
+    def model(self, theta, k1D=None, template=None, transfer=None, pol_sel=None):
+        """Evaluate the model.
+
+        Parameters
+        ----------
+        theta : np.ndarray[5]
+            Parameter values, ordered as ["omega", "b_HI", "NL", "FoGh", "M_10"].
+        k1D : np.ndarray[npol,nk]
+            K values for each pol. (Not actually used in model evaluation.)
+        template, transfer
+            Unused arguments.
+        pol_sel : np.ndarray
+            Indices of pols to evaluate for.
+
+        Returns
+        -------
+        model : np.ndarray[..., nk]
+            Model for the signal.
+        """
+
+        if k1D is None:
+            k1D = self.k1D
+
+        if pol_sel is None:
+            pol_sel = self.pol_sel
+
+        param_dict = {k: v for k, v in zip(self.param_name, theta)}
+
+        model = self._signal_template.signal_1D(**param_dict)[pol_sel]
 
         return model

@@ -8,7 +8,8 @@ import numpy as np
 from scipy.fftpack import next_fast_len
 
 from draco.util import tools
-from draco.core.containers import FrequencyStackByPol
+from draco.core.containers import FrequencyStackByPol, Powerspec1D
+from draco.analysis.powerspec import get_1d_ps
 
 from . import utils
 
@@ -21,7 +22,7 @@ class SignalTemplate:
     Parameters
     ----------
     derivs
-        A dictionary of derivates expected, giving their name (key), and a tuple of the
+        A dictionary of derivatives expected, giving their name (key), and a tuple of the
         parameter difference used in the simulations (between the perturbed sim and the
         base values) and the fiducial value of the parameter.
     factor
@@ -515,3 +516,375 @@ class SignalTemplateFoG(SignalTemplate):
         signalc = np.fft.irfft(fft_signal * fft_transfer, fsize, axis=-1)[..., fslice]
 
         return signalc
+
+
+class AutoSignalTemplate2D:
+    """Power spectrum signal templates from pre-simulated modes and input parameters.
+
+    Parameters
+    ----------
+    derivs : dict
+        A dictionary of derivatives expected, giving their name (key), and a tuple of the
+        parameter difference used in the simulations (between the perturbed sim and the
+        base values) and the fiducial value of the parameter.
+    factor : float
+        A scaling factor to apply to the sims.
+    aliases : float
+        Allow the parameters to be given by more meaningful names.
+    nbins : int
+        Number of 1d k bins. Default: 10.
+    logbins : bool
+        Whether bins should be log-spaced. Default: True.
+    """
+
+    def __init__(
+        self,
+        derivs: Optional[Dict[str, Tuple[float, float]]] = None,
+        factor: float = 1.0,
+        aliases: Optional[Dict[str, str]] = None,
+        nbins: int = 10,
+        logbins: bool = True,
+    ):
+
+        if derivs is None:
+            derivs = {
+                "NL": (0.3, 1.0),
+                "FoGh": (0.2, 1.0),
+            }
+        self._derivs = derivs
+        self._factor = factor
+        self._aliases = aliases if aliases is not None else {}
+        self._nbins = nbins
+        self._logbins = logbins
+        logger.debug(f"Using deriv modes: {self._derivs}")
+        logger.debug(f"Using aliases: {self._aliases}")
+        logger.debug(f"Using factor: {self._factor}")
+        logger.debug(
+            f"Using {self._nbins} "
+            f"{'log-spaced' if self._logbins else 'linearly-spaced'} bins"
+        )
+
+    @classmethod
+    def load_from_ps2Dfiles(
+        cls,
+        pattern: str,
+        pol: List[str] = None,
+        weight: np.ndarray = None,
+        signal_mask: np.ndarray = None,
+        combine: bool = True,
+        **kwargs,
+    ):
+        """Load the signal template from a set of 2d power spectrum files.
+
+        This will load the ps2D files from each location and try and compile them into
+        a set which can be used to generate signal templates.
+
+        The signal templates should be stored in directories with names of the form
+        `*_compderiv-d-par`, where:
+        - `d` is one of `0`, `h`, or `1`, corresponding to the value of b_HI
+        - `par` denotes a specific combination of other parameters
+
+        Parameters
+        ----------
+        pattern
+            A glob pattern that isolates the base signal templates.
+        pol
+            The desired polarisations.
+        weight
+            The weight to use when averaging over polarisations and binning
+            from 2d to 1d. Must have shape [npol, kpar, kperp].
+        signal_mask
+            Boolean mask to use when binning from 2d down to 1d.
+            Must have shape [npol, kpar, kperp].
+        combine
+            Add an element to the polarisation axis called I that
+            is the weighted sum of the XX and YY polarisation.
+        **kwargs
+            Arguments passed on to the constructor.
+        """
+
+        dirs = glob.glob(pattern)
+
+        matching = {}
+
+        # Find directories which match the right format
+        for d in sorted(dirs):
+            mo = re.search(r"_compderiv-([^\/]+)", d)
+
+            if mo is None:
+                print(f"Directory {d} does not match expected format, rejecting")
+                continue
+
+            key = mo.group(1)
+
+            if key in matching:
+                raise ValueError(
+                    "Did not find a unique set of modes at this location. "
+                    "You might need to refine the pattern."
+                )
+
+            d = Path(d)
+
+            if not d.is_dir():
+                raise ValueError("Glob must point to directories")
+
+            matching[key] = Path(d)
+
+        # For each directory load all the ps2D files and combine them
+        ps2Ds = {}
+        for key, d in matching.items():
+            ps2D_files = sorted(list(d.glob("*.h5")))
+
+            if len(ps2D_files) == 0:
+                print("No files found at matching path.")
+                continue
+
+            mocks = utils.load_mocks(ps2D_files, pol=pol)
+            ps2Ds[key] = utils.average_data(
+                mocks, pol=mocks.pol, combine=combine, sort=False
+            )
+
+        # Create the object
+        self = cls(**kwargs)
+
+        # Save signal mask and ps2D weights, for later use in binning
+        # 2d power spectrum to 1d
+        self._signal_mask = (
+            signal_mask
+            if signal_mask is not None
+            else next(iter(ps2Ds.values())).signal_mask[:].copy()
+        )
+        self._ps2D_weight = (
+            weight
+            if weight is not None
+            else next(iter(ps2Ds.values())).ps2D_weight[:].copy()
+        )
+
+        # Try and construct all the required templates from the stacks
+        self._interpret_ps2Ds(ps2Ds)
+
+        return self
+
+    def _interpret_ps2Ds(
+        self,
+        ps2Ds: Dict[str, Powerspec1D],
+    ):
+        # Generate the required templates from the 2d power spectra
+
+        # Find all entries that have the linear component structure
+        compterms = [k.split("-")[1] for k in ps2Ds.keys() if k.startswith("0")]
+
+        ps2D_modes = {}
+
+        # Get the first kpar, kperp axes as references
+        self._kpar = next(iter(ps2Ds.values())).kpar[:].copy()
+        self._kperp = next(iter(ps2Ds.values())).kperp[:].copy()
+        self._kpar.flags.writeable = False
+        self._kperp.flags.writeable = False
+
+        def _check_load_ps2D(key):
+            # Validate the 2D power spectrum and extract the template and its variance
+
+            if key not in ps2Ds:
+                raise RuntimeError(f"Power spectrum {key} was not loaded.")
+
+            ps2D = ps2Ds[key]
+
+            if not np.array_equal(ps2D.kpar[:], self._kpar):
+                raise RuntimeError(
+                    f"k_par values in power spectrum {key} do not match reference."
+                )
+
+            if not np.array_equal(ps2D.kperp[:], self._kperp):
+                raise RuntimeError(
+                    f"k_perp values in power spectrum {key} do not match reference."
+                )
+
+            return (
+                self._factor * ps2D.ps2D[:],
+                self._factor**2
+                * tools.invert_no_zero(ps2D.attrs["num"] * ps2D.ps2D_weight[:]),
+            )
+
+        # For all linear component terms, load them and construct the various HI,v
+        # combination terms
+        for term in compterms:
+            logger.debug(f"Combining mode {term}")
+
+            s0, v0 = _check_load_ps2D(f"0-{term}")
+            sh, vh = _check_load_ps2D(f"h-{term}")
+            s1, v1 = _check_load_ps2D(f"1-{term}")
+
+            # Initialize arrays for b_HI = 0, 1/2, 1
+            template_mean = np.zeros((3,) + s0.shape)
+            template_var = np.zeros((3,) + s0.shape)
+
+            # Calculate the template for each component
+            ## s_hh = 2 [s(1,1,0) - 2s(1,1/2,0) + s(1,0,0)]
+            template_mean[0] = 2 * (s1 - 2 * sh + s0)
+            ## s_hv = s(1,1/2,0) - s(1,0,0) - 1/4 shh
+            template_mean[1] = sh - s0 - 0.25 * template_mean[0]
+            ## s_vv = s(1,0,0)
+            template_mean[2] = s0
+
+            # Calculate the variance of each component, using error propagation
+            template_var[0] = 4 * (v1 + 4 * vh + v0)
+            template_var[1] = vh + v0 + 0.0625 * template_var[0]
+            template_var[2] = v0
+
+            ps2D_modes[term] = (template_mean, template_var)
+
+        self._ps2D_comp = {}
+        self._ps2D_noncomp = {}
+        self._ps2D_comp["base"] = ps2D_modes["base"]
+
+        # For the expected derivative modes, combine the perturbed entry and the base
+        # templates to get the derivative templates
+        for name, (delta, _) in self._derivs.items():
+            logger.debug(f"Interpreting derivative mode {name}")
+
+            if name not in ps2D_modes:
+                raise RuntimeError(f"Expected derivative {name} but could not load it.")
+
+            s, v = ps2D_modes[name]
+            sb, vb = ps2D_modes["base"]
+
+            # Calculate the finite difference derivative
+            fd_mode = (s - sb) / delta
+            fd_var = (v + vb) / delta**2
+
+            self._ps2D_comp[name] = (fd_mode, fd_var)
+
+        # Load any non-component type terms. These are terms which sit outside the usual
+        # bias and Kaiser factors (such as shot noise)
+        noncompterms = [key for key in ps2Ds.keys() if "-" not in key]
+        for term in noncompterms:
+            logger.debug(f"Interpreting non-component mode {term}")
+            self._ps2D_noncomp[term] = _check_load_ps2D(term)
+
+    def signal_2D(self, *, omega: float, b_HI: float, **kwargs: float) -> np.ndarray:
+        """Return the 2D power spectrum signal template for the given parameters.
+
+        Parameters
+        ----------
+        omega
+            Overall scaling.
+        b_HI
+            Scaling for the HI bias term.
+        **kwargs
+            Values for all other derivative terms (e.g. NL) and non-component terms
+            (e.g. shotnoise).
+
+        Returns
+        -------
+        signal
+            Signal template for the given parameters. An array of [pol, kpar, kperp].
+        """
+
+        def _combine(vec):
+            # Combine the bias terms and templates to get a new template
+            return b_HI**2 * vec[0] + 2 * b_HI * vec[1] + vec[2]
+
+        # Generate the signal for the base model
+        signal = _combine(self._ps2D_comp["base"][0])
+
+        # Add in any derivative contributions
+        for name, (_, x0) in self._derivs.items():
+
+            ps2D = _combine(self._ps2D_comp[name][0])
+
+            name = self._aliases.get(name, name)
+            if name not in kwargs:
+                raise ValueError(f"Need a value for deriv parameter {name}")
+
+            x = kwargs[name]
+
+            signal += ps2D * (x - x0)
+
+        # Multiply signal by a Fourier-space function
+        # before adding in the non-component contributions
+        signal = self.multiply_pre_noncomp(signal, **kwargs)
+
+        # Scale by the overall prefactor (omega**2 for auto-correlation)
+        signal *= omega**2
+
+        # Add in any non-component contributions
+        for name, ps2D in self._ps2D_noncomp.items():
+
+            name = self._aliases.get(name, name)
+            if name not in kwargs:
+                raise ValueError(f"Need a value for non-comp parameter {name}")
+
+            x = kwargs[name]
+
+            signal += ps2D[0] * x
+
+        # Multiply signal by a Fourier-space function
+        # after adding in the non-component contributions
+        signal = self.multiply_post_noncomp(signal, **kwargs)
+
+        return signal
+
+    def signal_1D(self, *, omega: float, b_HI: float, **kwargs: float) -> np.ndarray:
+        """Return the 1D power spectrum template, binned from 2D template.
+
+        Parameters
+        ----------
+        omega
+            Overall scaling.
+        b_HI
+            Scaling for the HI bias term.
+        **kwargs
+            Values for all other derivative terms (e.g. NL) and non-component terms
+            (e.g. shotnoise).
+
+        Returns
+        -------
+        signal
+            Signal template for the given parameters. An array of [pol, k].
+        """
+
+        _signal_2D = self.signal_2D(omega=omega, b_HI=b_HI, **kwargs)
+
+        signal_1D = np.zeros((_signal_2D.shape[0], self._nbins))
+
+        for ipol in range(_signal_2D.shape[0]):
+
+            _, signal_1D[ipol], _, _ = get_1d_ps(
+                _signal_2D[ipol],
+                self._kperp,
+                self._kpar,
+                self._ps2D_weight[ipol],
+                self._signal_mask[ipol],
+                self._nbins + 1,
+                self._logbins,
+            )
+
+        return signal_1D
+
+    def multiply_pre_noncomp(self, signal: np.ndarray, **kwargs) -> np.ndarray:
+        """Override in subclass to multiply signal by function pre-non-components."""
+        return signal
+
+    def multiply_post_noncomp(self, signal: np.ndarray, **kwargs) -> np.ndarray:
+        """Override in subclass to multiply signal by function post-non-components."""
+        return signal
+
+    @property
+    def kpar(self):
+        """Get k_par values the template is defined at."""
+        return self._kpar
+
+    @property
+    def kperp(self):
+        """Get k_perp values the template is defined at."""
+        return self._kperp
+
+    @property
+    def params(self):
+        """The names of all the parameters needed to generate the template."""
+        return (
+            ["omega", "b_HI"]
+            + [self._aliases.get(name, name) for name in self._ps2D_comp.keys()]
+            + [self._aliases.get(name, name) for name in self._ps2D_noncomp.keys()]
+        )
