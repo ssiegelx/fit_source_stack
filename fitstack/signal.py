@@ -432,7 +432,7 @@ class SignalTemplateFoG(SignalTemplate):
         y = (ratio - 1.0) * tools.invert_no_zero(alpha**2 - ratio)
 
         w = (alpha**2 - ratio) ** 4 * tools.invert_no_zero(
-            (alpha * 2 - 1.0) ** 2 * var_ratio
+            (alpha**2 - 1.0) ** 2 * var_ratio
         )
 
         w *= ((tau >= self._delay_range[0]) & (tau <= self._delay_range[1])).astype(
