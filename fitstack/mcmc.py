@@ -29,8 +29,15 @@ def _all_subclasses(cls):
 
 SIMULATION_MODELS = [
     c.__name__
-    for c in [models.SimulationTemplate]
+    for c in [models.SimulationTemplate, models.AutoSimulationTemplate2Dto1D]
     + list(_all_subclasses(models.SimulationTemplate))
+    + list(_all_subclasses(models.AutoSimulationTemplate2Dto1D))
+]
+
+PS2D_SIMULATION_MODELS = [
+    c.__name__
+    for c in [models.AutoSimulationTemplate2Dto1D]
+    + list(_all_subclasses(models.AutoSimulationTemplate2Dto1D))
 ]
 
 PERCENTILE = [2.5, 16, 50, 84, 97.5]
@@ -40,6 +47,7 @@ PERCENTILE = [2.5, 16, 50, 84, 97.5]
 def run_mcmc(
     data,
     mocks,
+    data_2d=None,
     transfer=None,
     template=None,
     pol_fit="joint",
@@ -74,6 +82,11 @@ def run_mcmc(
         container, a list of FrequencyStackByPol or Powerspec1D containers,
         or the name of a file or a list of filenames that hold
         such containers and will be loaded from disk.
+    data_2d : Powerspec2D or str
+        Measurements of 2d power spectrum, either as a Powerspec2D container
+        or filename. When fitting to 1d power spectrum measurements with a model
+        that starts in 2d, weights and (kpar,kperp) masking will be taken from
+        here. Ignored if not needed.
     transfer : FrequencyStackByPol or str
         The transfer function of the pipeline (only implemented for stacking).
         The model for the stacked
@@ -93,7 +106,8 @@ def run_mcmc(
         fit to the "XX" and "YY" polarisations.
     model_name : {"DeltaFunction"|"Exponential"|"ScaledShiftedTemplate"|
                   "SimulationTemplate"|"SimulationTemplateFoG"|
-                  "SimulationTemplateFoGAltParam"|"AutoConstant"}
+                  "SimulationTemplateFoGAltParam"|"AutoConstan"t"|
+                  "AutoSimulationTemplate2Dto1D"}
         Name of the model to fit.  Specify the class name from the
         fitstack.models module.
     scale : float
@@ -175,6 +189,18 @@ def run_mcmc(
     else:
         raise RuntimeError(f"Input container {type(data)} not supported")
 
+    # If using 1d power spectrum measurements with a 2d power spectrum model, load
+    # 2d measurements
+    ps2d_model = model_name in PS2D_SIMULATION_MODELS
+    if dset == "ps1D" and ps2d_model:
+        if data_2d is None:
+            raise RuntimeError(
+                "Must specify data_2d if fitting 1d power spectrum "
+                "measurements with model that starts in 2d"
+            )
+        if isinstance(data_2d, str):
+            data_2d = utils.load_pol(utils.find_file(data_2d), pol=required_pol)
+
     # Load the transfer function (not implemented for power spectra)
     if transfer is not None and isinstance(transfer, str):
         if dset == "ps1D":
@@ -216,9 +242,25 @@ def run_mcmc(
 
     # For the simulation template, we need to provide parameters to average the polarisations
     if model_name in SIMULATION_MODELS:
-        model_kwargs["weight"] = (
-            data.weight[:] if dset == "stack" else tools.invert_no_zero(data.ps1D_var)
-        )
+        if dset == "stack":
+            model_kwargs["weight"] = data.weight[:]
+        else:
+            if ps2d_model:
+                # If our power spectrum model starts from 2d, take weights and signal_mask
+                # from data_2d
+                _, weight_meas_2d, _, _, signal_mask_2d = utils.initialize_pol(
+                    data_2d,
+                    pol=required_pol,
+                    combine=combine_pol,
+                    return_signal_mask=True,
+                )
+                model_kwargs["weight"] = weight_meas_2d
+                model_kwargs["signal_mask"] = signal_mask_2d
+
+                model_kwargs["nbins"] = data.k1D.shape[-1]
+            else:
+                model_kwargs["weight"] = tools.invert_no_zero(data.ps1D_var[:])
+
         model_kwargs["pol"] = required_pol
         model_kwargs["combine"] = combine_pol
         model_kwargs["sort"] = True

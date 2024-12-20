@@ -10,6 +10,7 @@ from draco.core.containers import (
     MockFrequencyStackByPol,
     Stack3D,
     Powerspec1D,
+    Powerspec2D,
 )
 
 
@@ -120,6 +121,38 @@ class MockPowerspec1D(Powerspec1D):
         "k1D": {
             "axes": ["mock", "pol", "k"],
             "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+    }
+
+
+class MockPowerspec2D(Powerspec2D):
+    """Container for multiple 2d power spectrum.
+
+    This will most commonly be used to store several noise power spectra,
+    for use in computing a covariance matrix. The spectra will be indexed
+    by the `mock` axis, to carry over conventions from the stacking analysis.
+    """
+
+    _axes = ("mock",)
+
+    _dataset_spec: ClassVar = {
+        "ps2D": {
+            "axes": ["mock", "pol", "kpar", "kperp"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "ps2D_weight": {
+            "axes": ["mock", "pol", "kpar", "kperp"],
+            "dtype": np.float64,
+            "initialise": True,
+            "distributed": False,
+        },
+        "signal_mask": {
+            "axes": ["mock", "pol", "kpar", "kperp"],
+            "dtype": bool,
             "initialise": True,
             "distributed": False,
         },
