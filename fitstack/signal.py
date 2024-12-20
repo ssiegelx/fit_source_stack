@@ -388,6 +388,20 @@ class SignalTemplateFoG(SignalTemplate):
     ) -> np.ndarray:
         """Solve for the effective scale of the FoG damping.
 
+        Note that the scale parameter returned by this function is different from
+        the scale parameter defined in the eBOSS stacking paper: if :math:`s` is the
+        code parameter and :math:`\sigma_{\rm eff}` is the paper's parameter, then
+
+        .. math::
+
+            s = \sigma_{\rm eff} / \sqrt{2}
+
+        Therefore, the FoG kernel is defined as
+
+        .. math::
+
+            H(\tau, s) = 1 / (1 + (s \tau)^2)
+
         Parameters
         ----------
         base
@@ -400,8 +414,7 @@ class SignalTemplateFoG(SignalTemplate):
         Returns
         -------
         scale : np.ndarray[npol,]
-            The effective scale of the transfer function:
-                H(\tau) = 1 / (1 + (scale * \tau)^2)
+            The effective scale of the transfer function.
         """
 
         nfreq = self.freq.size
@@ -409,9 +422,12 @@ class SignalTemplateFoG(SignalTemplate):
         tau = np.fft.rfftfreq(nfreq, d=df)[np.newaxis, :]
         tau2 = tau**2
 
+        # FoG kernel acts in delay space, so we FFT the stacks from freq to delay
         mu_fft_base = np.abs(np.fft.rfft(base.stack[:], nfreq, axis=-1))
         mu_fft_deriv = np.abs(np.fft.rfft(deriv.stack[:], nfreq, axis=-1))
 
+        # Get variance of base and deriv delay-space stacks, for usage in
+        # error propagation
         var_fft_base = np.sum(
             tools.invert_no_zero(base.attrs["num"] * base.weight[:]),
             axis=-1,
@@ -423,14 +439,27 @@ class SignalTemplateFoG(SignalTemplate):
             keepdims=True,
         )
 
+        # Compute ratio of base and deriv stacks, and compute variance of
+        # ratio using error propagation
         ratio = mu_fft_base * tools.invert_no_zero(mu_fft_deriv)
         var_ratio = ratio**2 * (
             var_fft_base * tools.invert_no_zero(mu_fft_base**2)
             + var_fft_deriv * tools.invert_no_zero(mu_fft_deriv**2)
         )
 
+        # If each delay-space signal was exactly proportional to H(tau) as defined
+        # in the docstring, the ratio would be equal to
+        #   H(tau,alpha*s)^2 / H(tau,s)^2 .
+        # This might not exactly be true because of how the data were processed,
+        # but we'll assume it's true and fit for an effective value of s.
+        # To do so, we write
+        #   ratio = H(tau,alpha*s)^2 / H(tau,s)^2
+        # and then solve for y, defined to be kpar^2 s^2.
         y = (ratio - 1.0) * tools.invert_no_zero(alpha**2 - ratio)
 
+        # We then compute weights w that are equal to the inverse variance of y,
+        # computed via error propagation. We also zero out tau values that are
+        # beyond the desired fitting range
         w = (alpha**2 - ratio) ** 4 * tools.invert_no_zero(
             (alpha**2 - 1.0) ** 2 * var_ratio
         )
@@ -439,6 +468,10 @@ class SignalTemplateFoG(SignalTemplate):
             np.float32
         )
 
+        # From the definition of y, we know that s^2 = y/tau^2. We optimally
+        # estimate s^2 by taking an inverse-variance weighted average of y/tau^2
+        # over all tau values. (We'll only use s^2 in calculations, so it
+        # makes sense to estimate s^2 instead of s.)
         scale2 = np.sum(w * tau2 * y, axis=-1) * tools.invert_no_zero(
             np.sum(w * tau2**2, axis=-1)
         )
@@ -498,21 +531,27 @@ class SignalTemplateFoG(SignalTemplate):
         # Assumes a Lorentzian in delay space.
         fft_transfer = np.ones_like(fft_signal)
 
+        # Loop over parameters corresponding to distinct kernels we'll need to
+        # convolve the signal by
         for name, (_, x0) in self._convolutions.items():
 
+            # Get scale corresponding to base template
             scale0 = self._convolution_scale[name][:, np.newaxis]
 
+            # Get aliased name of parameter and parameter value
             name = self._aliases.get(name, name)
             if name not in kwargs:
                 raise ValueError(f"Need a value for convolution parameter {name}")
-
             x = kwargs[name]
 
+            # Re-scale effective convolution scale
             alpha = x / x0
             scale = alpha * scale0
 
+            # Accumulate kernel into delay-space transfer function
             fft_transfer *= (1.0 + (scale0 * tau) ** 2) / (1.0 + (scale * tau) ** 2)
 
+        # Multiply signal by transfer function and ifft back to frequency-space
         signalc = np.fft.irfft(fft_signal * fft_transfer, fsize, axis=-1)[..., fslice]
 
         return signalc
