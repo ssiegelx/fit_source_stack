@@ -982,8 +982,8 @@ class AutoSignalTemplate2DFoG(AutoSignalTemplate2D):
         ps2D_deriv = deriv.ps2D[:]
 
         # Get variance of base and deriv ps2D, for usage in error propagation
-        var_ps2D_base = tools.invert_no_zero(base.attrs["num"] * base.ps2D_weight[:])
-        var_ps2D_deriv = tools.invert_no_zero(deriv.attrs["num"] * deriv.ps2D_weight[:])
+        var_ps2D_base = tools.invert_no_zero(base.ps2D_weight[:])
+        var_ps2D_deriv = tools.invert_no_zero(deriv.ps2D_weight[:])
 
         # Compute ratio of base and deriv ps2D, and compute variance in ratio using
         # error propagation
