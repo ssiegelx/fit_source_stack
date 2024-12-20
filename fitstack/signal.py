@@ -8,7 +8,7 @@ import numpy as np
 from scipy.fftpack import next_fast_len
 
 from draco.util import tools
-from draco.core.containers import FrequencyStackByPol, Powerspec1D
+from draco.core.containers import FrequencyStackByPol, Powerspec1D, Powerspec2D
 from draco.analysis.powerspec import get_1d_ps
 
 from . import utils
@@ -888,3 +888,201 @@ class AutoSignalTemplate2D:
             + [self._aliases.get(name, name) for name in self._ps2D_comp.keys()]
             + [self._aliases.get(name, name) for name in self._ps2D_noncomp.keys()]
         )
+
+
+class AutoSignalTemplate2DFoG(AutoSignalTemplate2D):
+    """Create signal templates from pre-simulated modes and input parameters.
+
+    Multiplies the 2d power spectrum with a kernel to simulate FoG damping,
+    in contrast to the AutoSignalTemplate2D class, which uses a linear model for
+    the FoG damping.
+
+    Parameters
+    ----------
+    derivs
+        A dictionary of derivatives expected, giving their name (key), and a tuple of the
+        parameter difference used in the simulations (between the perturbed sim and the
+        base values) and the fiducial value of the parameter.
+    convolutions
+        A dictionary of the expected convolution parameters, giving their name (key),
+        and a tuple of the parameter difference used in the simulations (between the
+        perturbed sim and the base values) and the fiducial value of the parameter.
+    kpar_range
+        The lower and upper boundary of k_parallel that will be used to fit for
+        the effective scale of the base convolution kernel.
+        Defaults to (0, 5) Mpc^-1.
+    """
+
+    def __init__(
+        self,
+        derivs: Optional[Dict[str, Tuple[float, float]]] = None,
+        convolutions: Optional[Dict[str, Tuple[float, float]]] = None,
+        kpar_range: Optional[Tuple[float, float]] = None,
+        *args,
+        **kwargs,
+    ):
+
+        if derivs is None:
+            derivs = {
+                "NL": (0.3, 1.0),
+            }
+        if convolutions is None:
+            convolutions = {
+                "FoGh": (0.2, 1.0),
+            }
+        if kpar_range is None:
+            kpar_range = (0.0, 5.0)
+
+        self._convolutions = convolutions
+        self._kpar_range = kpar_range
+
+        super().__init__(derivs=derivs, *args, **kwargs)
+        logger.debug(f"Using convolution parameters: {self._convolutions}")
+        logger.debug(
+            f"Fitting effective FoG scale over k_par range: {self._kpar_range}"
+        )
+
+    def _solve_scale(
+        self, base: Powerspec2D, deriv: Powerspec2D, alpha: float
+    ) -> np.ndarray:
+        """Solve for the effective scale of the FoG damping.
+
+        Note that the scale parameter returned by this function is different from
+        the scale parameter defined in the eBOSS stacking paper: if :math:`s` is the
+        code parameter and :math:`\sigma_{\rm eff}` is the paper's parameter, then
+
+        .. math::
+
+            s = \sigma_{\rm eff} / \sqrt{2}
+
+        Therefore, the FoG kernel is defined as
+
+        .. math::
+
+            H(k_\parallel, s) = 1 / (1 + (s k_\parallel)^2)
+
+        Parameters
+        ----------
+        base
+            2d power spectrum from simulations with the base parameters.
+        deriv
+            2d power spectrum from simulations with the FoG parameter perturbed.
+        alpha
+            The ratio of the FoG parameter for deriv relative to base.
+
+        Returns
+        -------
+        scale : np.ndarray[npol,]
+            The effective scale of the transfer function.
+        """
+
+        kpar2 = self.kpar[np.newaxis, :, np.newaxis] ** 2
+
+        ps2D_base = base.ps2D[:]
+        ps2D_deriv = deriv.ps2D[:]
+
+        # Get variance of base and deriv ps2D, for usage in error propagation
+        var_ps2D_base = tools.invert_no_zero(base.attrs["num"] * base.ps2D_weight[:])
+        var_ps2D_deriv = tools.invert_no_zero(deriv.attrs["num"] * deriv.ps2D_weight[:])
+
+        # Compute ratio of base and deriv ps2D, and compute variance in ratio using
+        # error propagation
+        ratio = ps2D_base / ps2D_deriv
+        var_ratio = ratio**2 * (
+            var_ps2D_base * tools.invert_no_zero(ps2D_base**2)
+            + var_ps2D_deriv * tools.invert_no_zero(ps2D_deriv**2)
+        )
+
+        # If each power spectrum was exactly proportional to H(kpar) as defined in
+        # the docstring, the ratio would be equal to
+        #   H(kpar,alpha*s)^2 / H(kpar,s)^2 .
+        # This might not exactly be true because of how the data were processed,
+        # but we'll assume it's true and fit for an effective value of s.
+        # To do so, we write
+        #   ratio = H(kpar,alpha*s)^2 / H(kpar,s)^2
+        # and then solve for y, defined to be kpar^2 s^2.
+        r_sqrt = ratio**0.5
+        y = (r_sqrt - 1.0) * tools.invert_no_zero(alpha**2 - r_sqrt)
+
+        # We then compute weights w that are equal to the inverse variance of y,
+        # computed via error propagation. We also zero out kpar values that are
+        # beyond the desired fitting range
+        w = (
+            4
+            * ratio
+            * (alpha**2 - r_sqrt) ** 4
+            * tools.invert_no_zero((alpha * 2 - 1.0) ** 2 * var_ratio)
+        )
+        w_mask = (self.kpar >= self._kpar_range[0]) & (self.kpar <= self._kpar_range[1])
+        w *= w_mask[np.newaxis, :, np.newaxis]
+
+        # From the definition of y, we know that s^2 = y/kpar^2. We optimally
+        # estimate s^2 by taking an inverse-variance weighted average of y/kpar^2
+        # over all (kpar,kperp) values. (We'll only use s^2 in calculations, so it
+        # makes sense to estimate s^2 instead of s.)
+        scale2 = np.sum(w * kpar2 * y, axis=(-1, -2)) * tools.invert_no_zero(
+            np.sum(w * kpar2**2, axis=(-1, -2))
+        )
+
+        return np.sqrt(scale2)
+
+    def _interpret_ps2Ds(self, ps2Ds: Dict[str, Powerspec1D]):
+
+        super()._interpret_ps2Ds(ps2Ds)
+
+        base = ps2Ds["1-base"]
+
+        self._convolution_scale = {}
+
+        for name, (delta, x0) in self._convolutions.items():
+
+            key = f"1-{name}"
+
+            alpha = (x0 + delta) / x0
+
+            if key not in ps2Ds:
+                raise RuntimeError(f"Expected derivative {name} but could not load it.")
+
+            # Determine the effective scale
+            scale = self._solve_scale(base, ps2Ds[key], alpha)
+            self._convolution_scale[name] = scale
+
+    def multiply_pre_noncomp(self, signal: np.ndarray, **kwargs) -> np.ndarray:
+        """Multiply the 2d power spectrum with the relative FoG kernel.
+
+        Parameters
+        ----------
+        signal : np.ndarray[npol, nkpar, nkperp]
+            The 2d power spectrum before adding the non-component contributions.
+        kwargs : dict
+            All parameter values.
+
+        Returns
+        -------
+        signal : np.ndarray[npol, nkpar, nkperp]
+            The 2d power spectrum after multiplication with the relative FoG kernel.
+        """
+
+        # Loop over parameters corresponding to distinct kernels we'll need to
+        # multiply into the signal
+        for name, (_, x0) in self._convolutions.items():
+
+            # Get scale corresponding to base template
+            scale0 = self._convolution_scale[name][:, np.newaxis, np.newaxis]
+
+            # Get aliased name of parameter and parameter value
+            name = self._aliases.get(name, name)
+            if name not in kwargs:
+                raise ValueError(f"Need a value for convolution parameter {name}")
+            x = kwargs[name]
+
+            # Re-scale effective convolution scale
+            alpha = x / x0
+            scale = alpha * scale0
+
+            # Multiply kernel into signal
+            signal *= (1.0 + (scale0 * self.kpar[np.newaxis, :, np.newaxis]) ** 2) / (
+                1.0 + (scale * self.kpar[np.newaxis, :, np.newaxis]) ** 2
+            )
+
+        return signal
