@@ -1091,3 +1091,45 @@ class AutoSimulationTemplate2Dto1D(Model):
         model = self._signal_template.signal_1D(**param_dict)[pol_sel]
 
         return model
+
+
+class AutoSimulationTemplate2Dto1DFoG(AutoSimulationTemplate2Dto1D):
+    """Power spectrum model with varying FoG damping via multiplicative kernel."""
+
+    param_name = ["omega", "b_HI", "NL", "FoGh", "M_10"]
+
+    _param_spec = {
+        "omega": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": -5.0,
+                "high": 5.0,
+            },
+        },
+        "b_HI": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": -5.0,
+                "high": 5.0,
+            },
+        },
+        "FoGh": {
+            "fixed": False,
+            "value": 1.0,
+            "prior": "Uniform",
+            "kwargs": {
+                "low": 0.0,
+                "high": 8.0,
+            },
+        },
+    }
+
+    _template_class = signal.AutoSignalTemplate2DFoG
+    _template_kwargs = AutoSimulationTemplate2Dto1D._template_kwargs + (
+        "convolutions",
+        "kpar_range",
+    )
